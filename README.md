@@ -40,10 +40,6 @@ Msearch also auto‑loads `SERPAPI_API_KEY` from `~/.api_keys` if present.
 - Raw JSON (debugging):
   msearch --json "your query"
 
-Examples:
-- msearch "what is api"
-- msearch --sources --hl en --gl US "vitamin d deficiency symptoms"
-
 ## Uninstall
 sudo apt remove msearch
 
