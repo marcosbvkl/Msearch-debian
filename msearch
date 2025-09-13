@@ -1,0 +1,250 @@
+#!/usr/bin/env python3
+import os
+import sys
+import json
+import urllib.parse
+import urllib.request
+import urllib.error
+
+
+API_URL = "https://serpapi.com/search"
+
+
+def eprint(*args, **kwargs):
+    print(*args, file=sys.stderr, **kwargs)
+
+
+def usage():
+    print(
+        "Usage: Msearch [--json] [--sources] [--hl en] [--gl US] query...\n"
+        "  Fetches Google results using SerpAPI.\n\n"
+        "Environment:\n"
+        "  SERPAPI_API_KEY   Required. Your SerpAPI key.\n"
+        "                    Also auto-loaded from ~/.api_keys if present.\n"
+        "  MSEARCH_HL        Optional. Language (hl), defaults to 'en'.\n"
+        "  MSEARCH_GL        Optional. Country (gl), e.g. 'US'.\n\n"
+        "Notes:\n"
+        "  - AI Overview may not appear for every query/locale.\n"
+        "  - When AI Overview is missing, this tool falls back to common fields."
+    )
+
+
+def fetch_ai_overview(api_key: str, query: str, hl: str, gl: str):
+    params = {
+        "engine": "google_ai_overview",
+        "q": query,
+        "api_key": api_key,
+    }
+    if hl:
+        params["hl"] = hl
+    if gl:
+        params["gl"] = gl
+
+    url = f"{API_URL}?{urllib.parse.urlencode(params)}"
+    req = urllib.request.Request(url, headers={"User-Agent": "Msearch/1.0 (+https://serpapi.com)"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"HTTP {resp.status} from SerpAPI")
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+            return data
+    except urllib.error.HTTPError as he:
+        body = he.read().decode("utf-8", errors="replace") if hasattr(he, 'read') else ""
+        raise RuntimeError(f"HTTP {he.code} from SerpAPI: {body}")
+
+
+def fetch_google_search(api_key: str, query: str, hl: str, gl: str):
+    """Fallback to standard Google engine; sometimes includes ai_overview."""
+    params = {
+        "engine": "google",
+        "q": query,
+        "api_key": api_key,
+    }
+    if hl:
+        params["hl"] = hl
+    if gl:
+        params["gl"] = gl
+
+    url = f"{API_URL}?{urllib.parse.urlencode(params)}"
+    req = urllib.request.Request(url, headers={"User-Agent": "Msearch/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+            return data
+    except urllib.error.HTTPError as he:
+        body = he.read().decode("utf-8", errors="replace") if hasattr(he, 'read') else ""
+        raise RuntimeError(f"HTTP {he.code} from SerpAPI: {body}")
+
+
+
+def render_text_blocks(blocks, indent=0):
+    lines = []
+    pad = " " * indent
+    for b in blocks or []:
+        btype = b.get("type")
+        if btype in ("heading", "paragraph"):
+            snippet = b.get("snippet")
+            if snippet:
+                if btype == "heading":
+                    lines.append(f"{pad}{snippet}")
+                    lines.append(f"{pad}{'-' * min(60, len(snippet))}")
+                else:
+                    lines.append(f"{pad}{snippet}")
+        elif btype == "list":
+            items = b.get("list") or []
+            for it in items:
+                # item can be a simple bullet with 'snippet' or a nested group with 'text_blocks'
+                if isinstance(it, dict) and "snippet" in it:
+                    lines.append(f"{pad}- {it['snippet']}")
+                elif isinstance(it, dict) and "text_blocks" in it:
+                    lines.extend(render_text_blocks(it.get("text_blocks") or [], indent=indent))
+        elif btype == "expandable":
+            # treat like a paragraph + nested list if present
+            title = b.get("snippet")
+            if title:
+                lines.append(f"{pad}{title}")
+            inner = b.get("text_blocks")
+            if inner:
+                lines.extend(render_text_blocks(inner, indent=indent + 2))
+        elif btype == "comparison":
+            # A table-like block; produce a simple readable format if present
+            labels = b.get("product_labels") or []
+            comp = b.get("comparison") or []
+            if labels and comp:
+                lines.append(f"{pad}Comparison: {', '.join(labels)}")
+                for row in comp:
+                    feat = row.get("feature")
+                    vals = row.get("values") or []
+                    lines.append(f"{pad}  {feat}: {', '.join(vals)}")
+        else:
+            # Unknown block; best effort
+            snippet = b.get("snippet")
+            if snippet:
+                lines.append(f"{pad}{snippet}")
+    return lines
+
+
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help"):
+        usage()
+        return 0
+
+    # Options
+    show_json = False
+    show_sources = False
+    hl = os.getenv("MSEARCH_HL", "en")
+    gl = os.getenv("MSEARCH_GL", "")
+
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--json":
+            show_json = True
+            i += 1
+        elif a == "--sources":
+            show_sources = True
+            i += 1
+        
+        elif a == "--hl" and i + 1 < len(argv):
+            hl = argv[i + 1]
+            i += 2
+        elif a == "--gl" and i + 1 < len(argv):
+            gl = argv[i + 1]
+            i += 2
+        else:
+            break
+
+    query = " ".join(argv[i:]).strip()
+    if not query:
+        eprint("Error: missing query.")
+        usage()
+        return 2
+
+    # Try to load SERPAPI_API_KEY from ~/.api_keys if not present
+    api_key = os.getenv("SERPAPI_API_KEY")
+    if not api_key:
+        try:
+            with open(os.path.expanduser("~/.api_keys"), "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("SERPAPI_API_KEY="):
+                        api_key = line.split("=", 1)[1].strip()
+                        if api_key:
+                            os.environ["SERPAPI_API_KEY"] = api_key
+                        break
+        except Exception:
+            pass
+
+    if not api_key:
+        eprint("Error: SERPAPI_API_KEY not set. Export it and retry.")
+        usage()
+        return 2
+
+    data = None
+    try:
+        # Prefer standard Google engine; often includes ai_overview without page_token.
+        data = fetch_google_search(api_key, query, hl, gl)
+    except Exception as e:
+        eprint(f"SerpAPI request failed: {e}")
+        return 1
+
+    # If no data from API, try scraping if requested or no API key.
+    
+
+    if show_json:
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+        return 0
+
+    if isinstance(data, dict) and data.get("error"):
+        eprint(f"API error: {data.get('error')}")
+    aio = (data or {}).get("ai_overview")
+    if not aio:
+        eprint("No AI Overview found for this query/locale.")
+        # If standard Google search JSON was returned (engine fallback), try common field too
+        alt = (data or {}).get("ai_answer_box") or (data or {}).get("answer_box")
+        if alt:
+            # best effort display
+            text = alt.get("answer") or alt.get("snippet")
+            if text:
+                print(text)
+                return 0
+        # Knowledge Graph fallback
+        kg = (data or {}).get("knowledge_graph") or {}
+        desc = kg.get("description") or kg.get("title")
+        if isinstance(desc, str) and desc.strip():
+            print(desc.strip())
+            return 0
+        # Top organic result snippet fallback
+        organic = (data or {}).get("organic_results") or []
+        if organic:
+            top = organic[0] or {}
+            snippet = top.get("snippet") or top.get("title")
+            if snippet:
+                print(snippet)
+                return 0
+        return 3
+
+    text_blocks = aio.get("text_blocks") or []
+    lines = render_text_blocks(text_blocks)
+    if not lines:
+        eprint("AI Overview present but empty.")
+        return 3
+
+    print("\n".join(lines))
+
+    if show_sources:
+        refs = aio.get("references") or []
+        if refs:
+            print("\nSources:")
+            for r in refs:
+                idx = r.get("index")
+                title = r.get("title") or r.get("source") or ""
+                link = r.get("link") or ""
+                print(f"[{idx}] {title}\n    {link}")
+
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
